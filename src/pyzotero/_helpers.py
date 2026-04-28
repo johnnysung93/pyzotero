@@ -2,14 +2,28 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from pyzotero import zotero
+from pyzotero._config import env_bool, getenv_any, load_env
 
 
 def get_zotero_client(locale: str = "en-US") -> zotero.Zotero:
-    """Get a Zotero client configured for local access."""
-    return zotero.Zotero(library_id="0", library_type="user", local=True, locale=locale)
+    """Get a Zotero client from environment config or local Zotero defaults."""
+    load_env()
+    configured_remote = bool(getenv_any("PYZOTERO_LIBRARY_ID", "ZOTERO_LIBRARY_ID"))
+    local = env_bool("PYZOTERO_LOCAL", default=not configured_remote)
+    library_id = getenv_any("PYZOTERO_LIBRARY_ID", "ZOTERO_LIBRARY_ID", default="0" if local else "")
+    library_type = getenv_any("PYZOTERO_LIBRARY_TYPE", "ZOTERO_LIBRARY_TYPE", default="user")
+    api_key = getenv_any("PYZOTERO_API_KEY", "ZOTERO_API_KEY") or None
+    return zotero.Zotero(
+        library_id=library_id,
+        library_type=library_type,
+        api_key=api_key,
+        local=local,
+        locale=locale,
+    )
 
 
 def normalise_doi(doi: str) -> str:

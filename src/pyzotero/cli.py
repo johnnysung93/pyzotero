@@ -6,12 +6,14 @@ import functools
 import json
 import sys
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, TypeVar
 
 import click
 import httpx
 
 from pyzotero import __version__
+from pyzotero._config import DEFAULT_ENV_PATH, update_env_file
 from pyzotero._helpers import (
     annotate_with_library,
     build_doi_index,
@@ -31,6 +33,7 @@ from pyzotero.semantic_scholar import (
     get_references,
     search_papers,
 )
+from pyzotero._webdav import WebDAVConfig, WebDAVStorage, attachment_template_for_file
 from pyzotero.zotero import chunks
 
 F = TypeVar("F", bound=Callable[..., Any])
@@ -487,6 +490,197 @@ def test(ctx: Any) -> None:
         click.echo("  Received expected empty settings response.")
     else:
         click.echo(f"  Received response: {json.dumps(result)}")
+
+
+@main.command("setup-webdav")
+@click.option("--url", help="WebDAV parent URL or Zotero directory URL.")
+@click.option("--username", help="WebDAV username.")
+@click.option("--password", help="WebDAV password.")
+@click.option(
+    "--auth",
+    type=click.Choice(["basic", "digest"]),
+    default="basic",
+    show_default=True,
+    help="WebDAV authentication mode.",
+)
+@click.option(
+    "--env-file",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=DEFAULT_ENV_PATH,
+    show_default=True,
+    help="Dotenv file to create or update.",
+)
+@click.option(
+    "--pyzotero-names",
+    is_flag=True,
+    help="Write PYZOTERO_WEBDAV_* keys instead of WEBDAV_* aliases.",
+)
+@click.option(
+    "--skip-test",
+    is_flag=True,
+    help="Do not verify the WebDAV server after writing config.",
+)
+@cli_error_handler
+def setup_webdav(
+    url: str | None,
+    username: str | None,
+    password: str | None,
+    auth: str,
+    env_file: Path,
+    pyzotero_names: bool,
+    skip_test: bool,
+) -> None:
+    """Create or update WebDAV settings in ~/.config/pyzotero/.env."""
+    url = url or click.prompt("WebDAV URL")
+    username = username or click.prompt("WebDAV username")
+    password = password or click.prompt("WebDAV password", hide_input=True)
+
+    if pyzotero_names:
+        values = {
+            "PYZOTERO_WEBDAV_URL": url,
+            "PYZOTERO_WEBDAV_USERNAME": username,
+            "PYZOTERO_WEBDAV_PASSWORD": password,
+            "PYZOTERO_WEBDAV_AUTH": auth,
+        }
+    else:
+        values = {
+            "WEBDAV_URL": url,
+            "WEBDAV_USER": username,
+            "WEBDAV_PASS": password,
+            "PYZOTERO_WEBDAV_AUTH": auth,
+        }
+
+    written = update_env_file(values, env_file)
+    click.echo(f"Updated WebDAV config in {written}")
+
+    if skip_test:
+        return
+
+    storage = WebDAVStorage(
+        WebDAVConfig(url=url, username=username, password=password, auth=auth)
+    )
+    storage.verify()
+    click.echo("Connection successful: Zotero WebDAV storage is reachable and writable.")
+
+
+@main.command("webdav-test")
+@cli_error_handler
+def webdav_test() -> None:
+    """Test the configured Zotero WebDAV storage endpoint.
+
+    Required config in ~/.config/pyzotero/.env or environment:
+        PYZOTERO_WEBDAV_URL
+        PYZOTERO_WEBDAV_USERNAME
+        PYZOTERO_WEBDAV_PASSWORD
+
+    """
+    storage = WebDAVStorage()
+    storage.verify()
+    click.echo("Connection successful: Zotero WebDAV storage is reachable and writable.")
+
+
+@main.command("webdav-upload")
+@click.argument("file", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option("--parent", help="Parent Zotero item key for the new attachment")
+@click.option("--title", help="Attachment title. Defaults to the file name.")
+@click.option(
+    "--metadata-only",
+    is_flag=True,
+    help="Create Zotero attachment metadata without uploading to WebDAV.",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output result as JSON",
+)
+@click.pass_context
+@cli_error_handler
+def webdav_upload(
+    ctx: Any,
+    file: Path,
+    parent: str | None,
+    title: str | None,
+    metadata_only: bool,
+    output_json: bool,
+) -> None:
+    """Create a Zotero stored-file attachment and sync its file to WebDAV."""
+    zot = _zot_from_ctx(ctx)
+    template = attachment_template_for_file(file, title=title)
+    created = zot.create_items([template], parentid=parent)
+    success = created.get("success", {})
+    if not success:
+        raise click.ClickException(f"Zotero item creation failed: {json.dumps(created)}")
+    attachment_key = next(iter(success.values()))
+
+    webdav_metadata = None
+    if not metadata_only:
+        storage = WebDAVStorage()
+        webdav_metadata = storage.upload_file(
+            attachment_key,
+            file,
+            filename=template["filename"],
+            mtime=template["mtime"],
+            md5=template["md5"],
+        )
+
+    result = {
+        "key": attachment_key,
+        "parent": parent,
+        "filename": template["filename"],
+        "contentType": template["contentType"],
+        "mtime": template["mtime"],
+        "md5": template["md5"],
+        "webdav": webdav_metadata,
+        "zotero": created,
+    }
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    click.echo(f"Created attachment {attachment_key} for {template['filename']}")
+    if metadata_only:
+        click.echo("Skipped WebDAV upload (--metadata-only).")
+    else:
+        click.echo("Uploaded attachment file to WebDAV.")
+
+
+@main.command("webdav-download")
+@click.argument("key")
+@click.option(
+    "-o",
+    "--output",
+    type=click.Path(file_okay=False, path_type=Path),
+    default=Path("."),
+    help="Directory to extract the attachment into.",
+)
+@click.option(
+    "--json",
+    "output_json",
+    is_flag=True,
+    help="Output result as JSON",
+)
+@click.pass_context
+@cli_error_handler
+def webdav_download(ctx: Any, key: str, output: Path, output_json: bool) -> None:
+    """Download a Zotero attachment file from WebDAV by attachment key."""
+    zot = _zot_from_ctx(ctx)
+    item = zot.item(key)
+    data = item.get("data", {}) if item else {}
+    filename = data.get("filename")
+    storage = WebDAVStorage()
+    result = storage.download_attachment(key, output, filename=filename)
+    result["item"] = {
+        "key": key.upper(),
+        "title": data.get("title"),
+        "filename": filename,
+        "contentType": data.get("contentType"),
+    }
+    if output_json:
+        click.echo(json.dumps(result, indent=2))
+        return
+    click.echo(f"Downloaded attachment {key.upper()} to {output}")
+    for extracted in result["files"]:
+        click.echo(f"  {extracted}")
 
 
 @main.command()

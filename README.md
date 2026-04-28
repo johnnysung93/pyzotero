@@ -2,6 +2,8 @@
 
 # Pyzotero: An API Client for the Zotero API
 
+This repository is a fork of [`urschrei/pyzotero`](https://github.com/urschrei/pyzotero) from the `main` branch, with additional CLI/WebDAV workflow changes for agent-based Zotero file synchronization.
+
 # Quickstart
 
 1. `uv add pyzotero` **or** `pip install pyzotero` **or** `conda install conda-forge::pyzotero`
@@ -89,6 +91,83 @@ By default, the CLI outputs human-readable text with a subset of metadata includ
 - PDF attachments (with local file paths)
 
 Use the `--json` flag to output structured JSON.
+
+## Remote API and WebDAV file sync
+
+The CLI can also run in a container or agent environment without Zotero Desktop.
+Metadata is created through the Zotero Web API, while stored-file attachments can
+be uploaded to the same WebDAV backend used by Zotero Desktop.
+
+Create or update the WebDAV portion of `~/.config/pyzotero/.env`:
+
+```bash
+pyzotero setup-webdav
+```
+
+For non-interactive Docker or agent setup:
+
+```bash
+pyzotero setup-webdav \
+  --url "https://your-webdav-server/path/" \
+  --username "your_webdav_username" \
+  --password "your_webdav_password"
+```
+
+You can also create `~/.config/pyzotero/.env` manually or provide equivalent
+environment variables:
+
+```bash
+ZOTERO_LIBRARY_ID=your_user_or_group_id
+ZOTERO_LIBRARY_TYPE=user
+ZOTERO_API_KEY=your_zotero_api_key
+
+WEBDAV_URL=https://your-webdav-server/path/
+WEBDAV_USER=your_webdav_username
+WEBDAV_PASS=your_webdav_password
+```
+
+The `PYZOTERO_*` aliases are also supported:
+
+```bash
+PYZOTERO_LOCAL=false
+PYZOTERO_LIBRARY_ID=your_user_or_group_id
+PYZOTERO_LIBRARY_TYPE=user
+PYZOTERO_API_KEY=your_zotero_api_key
+
+PYZOTERO_WEBDAV_URL=https://your-webdav-server/path/
+PYZOTERO_WEBDAV_USERNAME=your_webdav_username
+PYZOTERO_WEBDAV_PASSWORD=your_webdav_password
+PYZOTERO_WEBDAV_AUTH=basic
+```
+
+If `PYZOTERO_WEBDAV_URL` or `WEBDAV_URL` points to the parent WebDAV directory,
+Pyzotero automatically uses the `zotero/` subdirectory. If the URL already ends
+in `/zotero`, it is used as-is.
+
+Useful commands:
+
+```bash
+# Check Zotero API access
+pyzotero listcollections
+
+# Check WebDAV access and writability
+pyzotero webdav-test
+
+# Create a stored-file attachment under an existing Zotero item and upload it to WebDAV
+pyzotero webdav-upload ./paper.pdf --parent ITEMKEY --json
+
+# Download an attachment payload from WebDAV by attachment key
+pyzotero webdav-download ATTACHMENTKEY -o ./downloads --json
+```
+
+`webdav-upload` creates Zotero attachment metadata with `linkMode=imported_file`
+and uploads the file to WebDAV using Zotero Desktop's storage convention:
+`ATTACHMENTKEY.zip` plus `ATTACHMENTKEY.prop` in the WebDAV `zotero/` directory.
+This is intended for automation agents such as OpenClaw running inside Docker.
+
+The command does not create the parent bibliographic item. Create the parent item
+through the Python API or another Zotero import path first, then pass its item
+key with `--parent`.
 
 # MCP Server
 
